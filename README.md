@@ -136,3 +136,8 @@ READMEは読み手が必要な手順を探せるよう、使用方法・仕様�
 ## uv.lockについて
 
 初期版では`uv.lock`を同梱していません。初回の`uv sync`で依存関係を解決します。
+
+
+## 動作確認動画
+
+[エッジ検出結果を重ねた短い確認動画](examples/foil_shift_overlay_example.mp4)を同梱しています。合成した電極箔の動画をCLIで処理した出力例です。元動画は [tests/fixtures/foil_shift.mp4](tests/fixtures/foil_shift.mp4) にあります。

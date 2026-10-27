@@ -8,4 +8,5 @@ profiles/
 *.mp4
 !tests/fixtures/*.avi
 !tests/fixtures/*.mp4
+!examples/*.mp4
 .env

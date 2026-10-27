@@ -47,4 +47,4 @@ if __name__=='__main__':
     grid_video('lens_grid.mp4',True)
     grid_video('plane_grid.mp4')
     foil_video()
-    print(*(f'{p.name}: {p.stat().st_size} bytes' for p in ROOT.glob('*.avi')),sep='\n')
+    print(*(f'{p.name}: {p.stat().st_size} bytes' for p in ROOT.glob('*.mp4')),sep='\n')
