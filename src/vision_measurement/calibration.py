@@ -1,0 +1,194 @@
+"""共通の円グリッド検出、レンズと平面の校正。"""
+from __future__ import annotations
+from pathlib import Path
+import cv2
+import numpy as np
+from .io import load_image, read_frames
+
+
+def grid_object_points(pattern: tuple[int, int], pitch_mm: float) -> np.ndarray:
+    cols, rows = pattern
+    if cols < 3 or rows < 3 or pitch_mm <= 0:
+        raise ValueError('円グリッドの個数と中心間距離を確認してください')
+    return (np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * pitch_mm).astype(np.float32)
+
+
+def _detector() -> cv2.SimpleBlobDetector:
+    p = cv2.SimpleBlobDetector_Params()
+    p.filterByArea = True
+    p.minArea = 15
+    p.maxArea = 80000
+    p.filterByCircularity = False
+    p.filterByConvexity = False
+    p.filterByInertia = False
+    p.filterByColor = True
+    p.blobColor = 0
+    return cv2.SimpleBlobDetector_create(p)
+
+
+def detect_grid(frame: np.ndarray, pattern: tuple[int, int] = (14, 10),
+                fill_holes: bool = True, fill_kernel: int = 9) -> np.ndarray | None:
+    """対称円グリッド検出。白抜きドットはClosingで補正して再試行。"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8)).apply(gray)
+    trials = [gray, clahe]
+    if fill_holes:
+        k = max(3, int(fill_kernel) | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        trials += [cv2.morphologyEx(clahe, cv2.MORPH_CLOSE, kernel)]
+    detector = _detector()
+    for image in trials:
+        for flags in (cv2.CALIB_CB_SYMMETRIC_GRID,
+                      cv2.CALIB_CB_SYMMETRIC_GRID | cv2.CALIB_CB_CLUSTERING):
+            ok, points = cv2.findCirclesGrid(image, pattern, flags=flags, blobDetector=detector)
+            if ok:
+                return points.reshape(-1, 2).astype(np.float32)
+    return None
+
+
+def _diversity(points: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    w, h = size
+    center = points.mean(axis=0) / (w, h)
+    extent = (points.max(axis=0) - points.min(axis=0)) / (w, h)
+    horizontal = points[-1] - points[0]
+    return np.r_[center, extent, np.arctan2(horizontal[1], horizontal[0]) / np.pi]
+
+
+def calibrate_lens(video: str | Path, pattern=(14, 10), pitch_mm=14., step=10,
+                   max_checked=300, max_used=35, min_change=0.025,
+                   fill_holes=True, fill_kernel=9) -> dict:
+    obj2d = grid_object_points(pattern, pitch_mm)
+    obj3d = np.column_stack([obj2d, np.zeros(len(obj2d))]).astype(np.float32)
+    objects, images, frames, size, last = [], [], [], None, None
+    inspected = detected = 0
+    for idx, frame in read_frames(video, step, max_checked):
+        inspected += 1
+        size = (frame.shape[1], frame.shape[0])
+        pts = detect_grid(frame, pattern, fill_holes, fill_kernel)
+        if pts is None:
+            continue
+        detected += 1
+        desc = _diversity(pts, size)
+        if last is not None and np.linalg.norm(desc - last) < min_change:
+            continue
+        objects.append(obj3d.copy()); images.append(pts.reshape(-1, 1, 2)); frames.append(idx)
+        last = desc
+        if len(images) >= max_used:
+            break
+    if len(images) < 5:
+        raise ValueError(f'校正に必要な画像が不足（検査{inspected}、検出{detected}、採用{len(images)}）。')
+    rms, k, d, rvecs, tvecs = cv2.calibrateCamera(objects, images, size, None, None)
+    per_frame = []
+    for idx, obj, img, r, t in zip(frames, objects, images, rvecs, tvecs):
+        pred, _ = cv2.projectPoints(obj, r, t, k, d)
+        err = float(np.sqrt(np.mean(np.sum((pred - img).reshape(-1, 2)**2, axis=1))))
+        per_frame.append({'frame': idx, 'rms_px': err})
+    return {'schema_version': 3, 'type': 'lens', 'source_size_px': list(size),
+            'camera_matrix': k.tolist(), 'distortion_coefficients': d.ravel().tolist(),
+            'rms_reprojection_px': float(rms), 'frames_checked': inspected,
+            'frames_detected': detected, 'frames_used': frames, 'frame_errors': per_frame,
+            'pattern': list(pattern), 'pitch_mm': pitch_mm}
+
+
+def _undistort_points(pts: np.ndarray, lens: dict | None) -> np.ndarray:
+    if lens is None:
+        return pts.reshape(-1, 2).astype(np.float64)
+    k, d = lens_matrices(lens)
+    return cv2.undistortPoints(np.asarray(pts, np.float64).reshape(-1, 1, 2), k, d, P=k).reshape(-1, 2)
+
+
+def lens_matrices(profile: dict):
+    return np.asarray(profile['camera_matrix'], np.float64), np.asarray(profile['distortion_coefficients'], np.float64)
+
+
+def _homography(src: np.ndarray, world: np.ndarray, ppm: float, margin_mm: float):
+    if len(src) < 4 or src.shape != world.shape:
+        raise ValueError('既知座標が対応する4点以上を指定してください')
+    lo = world.min(axis=0)
+    hi = world.max(axis=0)
+    targets = (world - lo + margin_mm) * ppm
+    h, _ = cv2.findHomography(src, targets, method=0)
+    if h is None:
+        raise ValueError('射影行列を求められません')
+    wh = np.ceil((hi - lo + 2*margin_mm) * ppm).astype(int)
+    if np.any(wh < 2) or np.any(wh > 10000) or np.prod(wh) > 40_000_000:
+        raise ValueError('出力画像サイズが不正です')
+    fit = cv2.perspectiveTransform(src.reshape(-1, 1, 2).astype(np.float64), h).reshape(-1, 2)
+    err = np.linalg.norm(fit - targets, axis=1)
+    return h, (int(wh[0]), int(wh[1])), float(np.sqrt(np.mean(err**2))), float(np.max(err))
+
+
+def calibrate_plane_points(image_points: np.ndarray, world_points_mm: np.ndarray,
+                           image_size: tuple[int, int], lens: dict | None = None,
+                           pixels_per_mm: float = 2., margin_mm: float = 10., mode='manual_points') -> dict:
+    src = _undistort_points(np.asarray(image_points), lens)
+    world = np.asarray(world_points_mm, dtype=np.float64).reshape(-1, 2)
+    if pixels_per_mm <= 0:
+        raise ValueError('pixels_per_mm は正の値が必要です')
+    h, output, rms, mx = _homography(src, world, pixels_per_mm, margin_mm)
+    result = {'schema_version': 3, 'type': 'plane', 'mode': mode,
+              'source_size_px': list(image_size), 'output_size_px': list(output),
+              'homography_undistorted_to_plane': h.tolist(),
+              'pixels_per_mm': float(pixels_per_mm), 'margin_mm': margin_mm,
+              'fit_rms_px': rms, 'fit_rms_mm': rms/pixels_per_mm,
+              'fit_max_px': mx, 'fitted_points': len(src),
+              'requires_lens_correction': lens is not None}
+    if lens is not None:
+        result['camera_matrix'] = lens['camera_matrix']
+        result['distortion_coefficients'] = lens['distortion_coefficients']
+    return result
+
+
+def calibrate_plane_grid(path: str | Path, pattern=(14, 10), pitch_mm=14.,
+                         lens: dict | None = None, step=15, max_checked=120,
+                         max_stationary_motion_px=2.5, fill_holes=True, fill_kernel=9,
+                         pixels_per_mm: float | None = None, margin_mm=14.) -> dict:
+    path = Path(path)
+    if path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}:
+        samples = [(0, load_image(path))]
+    else:
+        samples = list(read_frames(path, step, max_checked))
+    valid = []
+    size = None
+    for i, frame in samples:
+        size = frame.shape[1], frame.shape[0]
+        pts = detect_grid(frame, pattern, fill_holes, fill_kernel)
+        if pts is not None:
+            valid.append((i, _undistort_points(pts, lens)))
+    if not valid:
+        raise ValueError('全点の円グリッドを検出できませんでした')
+    # 動画は同じ平面・同じ姿勢の点群だけ集約する。動体を平均するとHが壊れる。
+    first = valid[0][1]
+    retained = [(i, p) for i, p in valid if np.median(np.linalg.norm(p-first, axis=1)) <= max_stationary_motion_px]
+    if len(retained) == 0:
+        raise ValueError('静止したボードのフレームがありません')
+    # 対称格子は向きが逆転して検出される場合があるため、対応順序が揃っているものだけ用いる。
+    pts = np.median(np.stack([p for _, p in retained]), axis=0)
+    world = grid_object_points(pattern, pitch_mm).astype(np.float64)
+    if pixels_per_mm is None:
+        grid = pts.reshape(pattern[1], pattern[0], 2)
+        spacing = np.r_[np.linalg.norm(np.diff(grid, axis=0), axis=2).ravel(),
+                        np.linalg.norm(np.diff(grid, axis=1), axis=2).ravel()]
+        pixels_per_mm = float(np.median(spacing)/pitch_mm)
+    # already undistorted points: avoid applying lens again
+    result = calibrate_plane_points(pts, world, size, None, pixels_per_mm, margin_mm, 'grid_video' if len(samples)>1 else 'grid_image')
+    result['requires_lens_correction'] = lens is not None
+    if lens is not None:
+        result['camera_matrix'] = lens['camera_matrix']
+        result['distortion_coefficients'] = lens['distortion_coefficients']
+    result['pattern'] = list(pattern); result['pitch_mm'] = pitch_mm
+    result['frames_checked'] = len(samples); result['frames_detected'] = len(valid)
+    result['frames_assumed_stationary'] = len(retained)
+    result['max_motion_px'] = float(max(np.median(np.linalg.norm(p-first, axis=1)) for _,p in valid))
+    holdout = retained[::2]; train = retained[1::2]
+    if len(train) >= 1 and len(holdout) >= 1:
+        train_pts = np.median(np.stack([p for _, p in train]), axis=0)
+        hh, _, _, _ = _homography(train_pts, world, pixels_per_mm, margin_mm)
+        goal = (world - world.min(axis=0) + margin_mm)*pixels_per_mm
+        errors = [np.linalg.norm(cv2.perspectiveTransform(p.reshape(-1,1,2), hh).reshape(-1,2)-goal, axis=1) for _,p in holdout]
+        result['holdout_rms_px'] = float(np.sqrt(np.mean(np.square(np.concatenate(errors)))))
+        result['holdout_rms_mm'] = result['holdout_rms_px']/pixels_per_mm
+    else:
+        result['holdout_rms_px'] = None
+        result['holdout_rms_mm'] = None
+    return result

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+results/
+profiles/
+*.avi
+*.mp4
+!tests/fixtures/*.avi
+!tests/fixtures/*.mp4
+.env
