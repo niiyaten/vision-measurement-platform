@@ -48,7 +48,7 @@ uv run vmeasure process tests/fixtures/foil_shift.mp4 `
 4. 画像上の四隅を「左上 → 右上 → 右下 → 左下」の順にクリックします。
 5. プレビューを確認し、名前を付けて校正JSONを保存します。
 
-先に `uv run python tests/generate_fixtures.py` で生成した `tests/fixtures/rectangle_tilted.png` では、幅100 mm・高さ60 mmとして試せます。
+サンプル `tests/fixtures/rectangle_tilted.png` では、幅100 mm・高さ60 mmとして試せます。
 誤クリック時は「4点をやり直す」を押してください。
 クリック時の画像は表示用に縮小することがありますが、保存する座標は元解像度のpxです。
 
@@ -93,8 +93,8 @@ uv run vmeasure process tests/fixtures/checkerboard_tiles.png `
 ```
 
 上記の分解能は**合成サンプル専用の既知値**です。実画像には流用しないでください。
-`tests/generate_fixtures.py` が作る `tests/fixtures/checkerboard_tiles.png` は黒18、白17の計35マスを含むテスト画像です。
-`examples/checkerboard_verified/` に、テスト時の各辺CSV・サマリーを用意しています。確認画像はCLI実行で生成します。
+`tests/fixtures/checkerboard_tiles.png` は黒18、白17の計35マスを含むテスト画像です。
+`examples/checkerboard_verified/` に、テスト時の各辺CSV・サマリー・確認画像を用意しています。
 
 面積、照明、反射、外周の欠け方によって検出数が変わります。
 HTML版とアルゴリズムの考え方は共通ですが、値の完全一致は保証しません。
@@ -212,3 +212,36 @@ READMEは読み手が必要な手順を探せるよう、使用方法・仕様�
 長方形の4点射影、全35マスの検出・各辺長、ROI内の出力とCSV生成を含みます。
 GUIのマウス操作自体は実ブラウザでの手動確認が必要です。
 実験映像への計測精度も未検証です。
+
+## 電極箔の下端輪郭を計測する
+
+箔の「下側に見える端」を検出し、上下方向の位置ずれを記録できます。左右のエッジから中心を求める既存の `foil_shift` とは別の解析方式です。実際に写っている輪郭に合わせて選んでください。
+
+GUIは「計測」→「電極箔・下端輪郭の追跡」を選択します。画像や動画を指定したら、下端だけを含むROIをドラッグで設定してください。プレビューには、検出点、近似直線、代表位置を表示します。Sobelカーネル、平滑化、勾配しきい値、列間隔、追跡範囲を変更できます。
+
+合成動画での実行例（既知の分解能 0.25 mm/px）：
+
+```powershell
+uv run vmeasure process tests/fixtures/foil_bottom_shift.mp4 `
+  --analysis foil_bottom `
+  --roi 100,160,540,365 `
+  --scale-mm-per-pixel 0.25 `
+  --bottom-save-points `
+  --output-dir results/bottom_demo
+```
+
+結果フォルダには `measurements.csv`（フレーム別の位置ずれと傾き）、`contour_points.csv`（`--bottom-save-points` 指定時のみ）、`overlay.mp4`（検出位置を重ねた確認用動画）、`corrected.mp4`、`manifest.json` を保存します。
+
+`shift_mm` は、画像の下向きを正とした下端の変位です。画面内の指定X位置で近似直線のY座標を求め、基準位置との差を計算しています。基準は初回有効フレーム（既定値）のほか、最初のNフレームの平均、固定Y座標から選べます。初期Nフレーム平均を選んだ場合、基準が確定するまでは変位欄が空になります。
+
+確認用の合成動画は [入力映像](tests/fixtures/foil_bottom_shift.mp4) と [計測結果の映像](examples/foil_bottom_overlay_example.mp4) にあります。このテスト動画の上下変位は、おおむね±4 mmです。
+
+設定項目と検出条件は [下端輪郭計測の説明](docs/foil_bottom.md) を確認してください。
+
+### 下端輪郭モードの制限
+
+下端と背景に明暗差があり、ROI内に下端が見えることが前提です。反射・遮蔽・複数の強い境界・急激な位置変化では誤検出する場合があります。検出の有効率や近似残差を確認し、出力動画で実際の輪郭と重なっているか確かめてください。
+
+`straightness_rms_mm` は検出した点の**近似直線に対する残差**です。測定器としての絶対精度ではありません。計測面の校正や独立した基準での精度検証は別途必要です。下端輪郭から得た変位が、設備に対する絶対位置を示すわけでもありません。
+
+現状のGUIのクリック／ドラッグ操作は、Windows上の実ブラウザでは自動検証できていません。Python側では合成画像・動画を使った自動テストを追加しています。

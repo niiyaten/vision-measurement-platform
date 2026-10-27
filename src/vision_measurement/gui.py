@@ -119,11 +119,48 @@ elif screen=='計測':
     else:mm=0.
     st.subheader('2. 計測入力')
     source=st.text_input('計測対象の画像・動画パス')
-    analysis=st.selectbox('計測方法',['foil_shift','checkerboard','edge','none'],format_func=lambda x:
-        {'foil_shift':'電極箔の位置ずれ','checkerboard':'市松模様（各マスの4辺）','edge':'汎用エッジ','none':'補正のみ'}[x])
-    baseline=st.number_input('電極箔の基準X座標(px)。0は初回検出を基準',value=0.) if analysis=='foil_shift' else 0.
+    analysis=st.selectbox('計測方法',['foil_shift','foil_bottom','checkerboard','edge','none'],format_func=lambda x:
+        {'foil_shift':'電極箔・左右端と中心の変位','foil_bottom':'電極箔・下端輪郭の追跡','checkerboard':'市松模様（各マスの4辺）','edge':'汎用エッジ','none':'補正のみ'}[x])
+    baseline=st.number_input('箔中心の基準X座標(px)。0は初回検出を基準',value=0.) if analysis=='foil_shift' else 0.
+    foil_opts={}
+    bottom_opts={}
+    if analysis=='foil_shift':
+        with st.expander('左右端のエッジ検出設定',expanded=False):
+            foil_opts['gaussian_kernel']=st.slider('平滑化カーネル（奇数）',1,15,5,2,key='foil_blur')
+            foil_opts['sobel_kernel']=st.selectbox('Sobelカーネル',[1,3,5,7],index=1,key='foil_sobel')
+            foil_opts['min_gradient']=st.number_input('最小エッジ強度',min_value=0.1,value=4.,step=1.,key='foil_strength')
+            foil_opts['min_separation_px']=st.number_input('左右エッジの最小間隔（px）',min_value=1,value=15,key='foil_sep')
+    if analysis=='foil_bottom':
+        st.subheader('下端輪郭の計測設定')
+        st.caption('画像の下側に見える箔端を検出します。画像Y座標は下向きが正です。')
+        c1,c2=st.columns(2)
+        with c1:
+            bottom_opts['polarity']=st.selectbox('箔と背景の明暗', ['bright','dark'],
+                format_func=lambda v:'明るい箔・暗い背景' if v=='bright' else '暗い箔・明るい背景')
+            bottom_opts['gaussian_kernel']=st.slider('平滑化カーネル（奇数）',1,15,5,2,key='bottom_blur')
+            bottom_opts['sobel_kernel']=st.selectbox('Sobelカーネル',[1,3,5,7],index=1,key='bottom_sobel')
+            bottom_opts['min_gradient']=st.number_input('下端の最小勾配強度',min_value=.1,value=40.,step=5.)
+        with c2:
+            bottom_opts['column_step']=st.slider('検出するX列の間隔（px）',1,20,4)
+            bottom_opts['tracking_window_px']=st.number_input('前フレームからの探索距離（px）',min_value=0.,value=40.,step=5.)
+            bottom_opts['min_coverage']=st.slider('有効列の最小割合',.1,1.,.6,.05)
+            bottom_opts['fit_tolerance_px']=st.number_input('直線フィットの外れ値許容（px）',min_value=.1,value=6.,step=1.)
+        baseline_mode_label=st.selectbox('下端位置の基準', ['first_valid','mean_n','fixed'],
+            format_func=lambda v:{'first_valid':'最初の有効フレーム',
+                                   'mean_n':'最初のNフレームの平均',
+                                   'fixed':'手動指定の画像Y座標'}[v])
+        bottom_opts['baseline_mode']=baseline_mode_label
+        if baseline_mode_label=='fixed':
+            bottom_opts['baseline_y_px']=st.number_input('基準のY座標（補正後px）',min_value=0.,value=130.,step=1.)
+        elif baseline_mode_label=='mean_n':
+            bottom_opts['baseline_frames']=st.number_input('平均に使用する有効フレーム数',min_value=1,value=10)
+            st.caption('Nフレームを集めるまでは基準が確定せず、位置ずれ量は空欄です。')
+        xref=st.number_input('代表位置を評価するX座標(px)。0でROI中央',min_value=0.,value=0.,step=1.)
+        if xref>0:bottom_opts['reference_x_px']=xref
+        bottom_opts['save_contour_points']=st.checkbox('フレームごとの下端輪郭点もCSV保存',value=False)
+
     roi=None
-    if analysis in ('foil_shift','checkerboard','edge'):
+    if analysis in ('foil_shift','foil_bottom','checkerboard','edge'):
         if st.checkbox('画像上でROI（計測範囲）を指定する',value=False):
             if source and Path(source).is_file():
                 try:
@@ -135,6 +172,23 @@ elif screen=='計測':
                     if roi:st.caption(f'ROI: x0={roi[0]}, y0={roi[1]}, x1={roi[2]}, y1={roi[3]} px')
                 except Exception as exc:st.error(str(exc))
             else:st.warning('ROI選択の前に計測対象ファイルを指定してください')
+    if analysis=='foil_bottom' and source and Path(source).is_file():
+        with st.expander('下端検出をプレビュー',expanded=True):
+            try:
+                from vision_measurement.foil_bottom import FoilBottomAnalyzer
+                frame_index=frame_picker(source,'bottom_preview_frame')
+                frame=preview_frame(source,frame_index)
+                corrected=MeasurementEngine(lens,plane).correct(frame)
+                preview_analyzer=FoilBottomAnalyzer(roi=roi,**bottom_opts)
+                preview_result=preview_analyzer.analyze(corrected,mm if plane is None and mm>0 else
+                    (1/float(plane['pixels_per_mm']) if plane else None),frame_index)
+                st.image(cv2.cvtColor(preview_result.overlay,cv2.COLOR_BGR2RGB),
+                         caption='青色の点：下端輪郭、橙色の直線：近似線、緑色の点：代表位置',
+                         use_container_width=True)
+                st.json(preview_result.values)
+                if not preview_result.values['valid']:
+                    st.warning('下端が検出できません。ROI、明暗、最小勾配を確認してください。')
+            except Exception as exc:st.error(f'下端プレビューに失敗しました: {exc}')
     if analysis=='checkerboard':
         color=st.selectbox('計測するマスの色',['both','dark','light'],format_func=lambda x:{'both':'黒・白の両方','dark':'黒のみ','light':'白のみ'}[x])
         minimum=st.number_input('マスの最小面積 (px²)',min_value=20,value=120,step=20)
@@ -150,7 +204,8 @@ elif screen=='計測':
         try:
             if not Path(source).is_file():raise ValueError('計測対象ファイルを指定してください')
             opts=ProcessOptions(save_corr,save_ov,fmt,1,mm if mm>0 else None)
-            extras={'baseline_x':baseline if baseline!=0 else None} if analysis=='foil_shift' else {}
+            extras={'baseline_x':baseline if baseline!=0 else None,**foil_opts} if analysis=='foil_shift' else {}
+            if analysis=='foil_bottom':extras.update(bottom_opts)
             if analysis=='checkerboard':extras.update(polarity=color,min_area=int(minimum),threshold=thresh)
             if roi is not None:extras['roi']=roi
             engine=MeasurementEngine(lens,plane,create_analyzer(analysis,**extras),opts)
@@ -167,6 +222,12 @@ elif screen=='計測':
             if summary.is_file():
                 st.subheader('フレーム別サマリー')
                 st.dataframe(pd.read_csv(summary,encoding='utf-8-sig'),use_container_width=True)
+            if analysis=='foil_bottom' and csv.is_file():
+                data=pd.read_csv(csv,encoding='utf-8-sig')
+                y_col='shift_mm' if data['shift_mm'].notna().any() else 'shift_px'
+                st.subheader('下端位置の時系列変化')
+                st.line_chart(data.set_index('frame')[[y_col]])
+                st.caption('正の位置ずれは画像下方向。座標は補正後の画像に対応します。')
             overlay_image=Path(out)/'overlay.png'
             overlay_video=Path(out)/('overlay.'+fmt)
             if overlay_image.is_file():st.image(str(overlay_image),caption='計測結果・各マスのID')

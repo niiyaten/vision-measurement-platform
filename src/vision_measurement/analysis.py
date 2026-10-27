@@ -1,6 +1,6 @@
 """追加可能な計測モジュール。各フレームをBGRで受け取る。"""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import cv2
 import numpy as np
 
@@ -9,6 +9,7 @@ class FrameResult:
     values: dict
     overlay: np.ndarray
     rows: list[dict] | None = None
+    details: list[dict] | None = None
 
 class Analyzer:
     name = 'base'
@@ -19,8 +20,15 @@ class FoilShiftAnalyzer(Analyzer):
     """明暗差の強い左右エッジを検出し、基準中心からの変位を計算。"""
     name = 'foil_shift'
     def __init__(self, roi: tuple[int,int,int,int] | None = None,
-                 baseline_x: float | None = None, min_separation_px: int = 15):
+                 baseline_x: float | None = None, min_separation_px: int = 15,
+                 gaussian_kernel: int = 5, sobel_kernel: int = 3, min_gradient: float = 4.):
+        if gaussian_kernel < 1 or gaussian_kernel > 31 or gaussian_kernel % 2 != 1:
+            raise ValueError('gaussian_kernel は 1～31 の奇数')
+        if sobel_kernel not in (1,3,5,7) or min_gradient <= 0 or min_separation_px < 1:
+            raise ValueError('Sobel・エッジ検出のパラメータが不正です')
         self.roi = roi; self.baseline = baseline_x; self.min_separation_px = min_separation_px
+        self.gaussian_kernel = gaussian_kernel; self.sobel_kernel = sobel_kernel
+        self.min_gradient = float(min_gradient)
 
     def analyze(self, frame, mm_per_pixel, frame_index):
         height, width = frame.shape[:2]
@@ -28,8 +36,8 @@ class FoilShiftAnalyzer(Analyzer):
         if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
             raise ValueError('ROIが画像範囲外です')
         gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-        smooth = cv2.GaussianBlur(gray, (5,5), 0)
-        signal = np.mean(cv2.Sobel(smooth, cv2.CV_32F, 1, 0, ksize=3), axis=0)
+        smooth = cv2.GaussianBlur(gray, (self.gaussian_kernel,self.gaussian_kernel), 0) if self.gaussian_kernel>1 else gray
+        signal = np.mean(cv2.Sobel(smooth, cv2.CV_32F, 1, 0, ksize=self.sobel_kernel), axis=0)
         half = max(1, int(self.min_separation_px))
         # 強い立上がり・立下がりを選ぶ。幅方向に流れる箔を想定。
         rising = int(np.argmax(signal))
@@ -37,7 +45,7 @@ class FoilShiftAnalyzer(Analyzer):
         falling_score = np.where(np.abs(candidates-rising)>=half, -signal, -np.inf)
         falling = int(np.argmax(falling_score))
         peak = min(float(signal[rising]), float(-signal[falling]))
-        valid = bool(peak > 4 and np.isfinite(peak))
+        valid = bool(peak > self.min_gradient and np.isfinite(peak))
         overlay = frame.copy()
         cv2.rectangle(overlay, (x0,y0),(x1-1,y1-1),(120,200,200),1)
         data={'frame': frame_index, 'valid': valid}
@@ -114,6 +122,9 @@ class EdgeAnalyzer(Analyzer):
 
 def create_analyzer(name: str, **options) -> Analyzer | None:
     if name in ('none', '', None): return None
+    if name == 'foil_bottom':
+        from .foil_bottom import FoilBottomAnalyzer
+        return FoilBottomAnalyzer(**options)
     cls={'foil_shift':FoilShiftAnalyzer,'checkerboard':CheckerboardAnalyzer,'edge':EdgeAnalyzer}.get(name)
     if cls is None: raise ValueError(f'未対応の計測モジュール: {name}')
     return cls(**options)

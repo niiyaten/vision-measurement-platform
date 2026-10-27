@@ -44,8 +44,26 @@ def foil_video():
     out.release()
 
 
+
+def foil_bottom_video():
+    """Synthetic 2D electrode foil bottom: known vertical shift and fixed waviness."""
+    out=writer('foil_bottom_shift.mp4')
+    for i in range(60):
+        frame=np.full((H,W,3),36,np.uint8)
+        xs=np.arange(110,531)
+        shift=round(16*np.sin(i/9.))
+        edge=np.rint(265+shift+0.035*(xs-320)+1.5*np.sin((xs-110)/17.)).astype(np.int32)
+        polygon=np.vstack([[[110,40],[530,40]],np.column_stack((xs[::-1],edge[::-1]))]).astype(np.int32)
+        cv2.fillPoly(frame,[polygon],(211,211,211))
+        cv2.putText(frame,'SYNTHETIC BOTTOM | 0.25 mm/px',(14,24),
+                    cv2.FONT_HERSHEY_SIMPLEX,.56,(30,30,220),2)
+        out.write(frame)
+    out.release()
+
+
 def rectangle_image():
     """Create 100 mm x 60 mm sample quadrilateral for interactive clicks."""
+    from pathlib import Path
     base=np.full((121,201,3),245,np.uint8)
     for x in range(0,201,20):cv2.line(base,(x,0),(x,120),(225,220,208),1)
     for y in range(0,121,20):cv2.line(base,(0,y),(200,y),(225,220,208),1)
@@ -70,11 +88,11 @@ def checkerboard_image():
             cv2.rectangle(bd,(x+3,y+3),(x+67,y+67),(value,)*3,-1)
     cv2.imwrite(str(ROOT/'checkerboard_tiles.png'),bd)
 
-
 if __name__=='__main__':
     grid_video('lens_grid.mp4',True)
     grid_video('plane_grid.mp4')
     foil_video()
+    foil_bottom_video()
     rectangle_image()
     checkerboard_image()
     print(*(f'{p.name}: {p.stat().st_size} bytes' for p in ROOT.glob('*.mp4')),sep='\n')

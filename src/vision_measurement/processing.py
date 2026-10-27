@@ -69,6 +69,8 @@ class MeasurementEngine:
     def process_image(self,source:str|Path,output_dir:str|Path) -> dict:
         source=Path(source);target=Path(output_dir);target.mkdir(parents=True,exist_ok=True)
         frame=load_image(source)
+        if self.analyzer is not None and hasattr(self.analyzer, "reset"):
+            self.analyzer.reset()
         corrected,result=self.process_frame(frame)
         outputs=[]
         if self.options.save_corrected:
@@ -77,7 +79,8 @@ class MeasurementEngine:
             save_image(target/'overlay.png',result.overlay);outputs.append('overlay.png')
         rows=(result.rows if result.rows is not None else [result.values]) if result else []
         summary=[result.values] if result else []
-        return self._finish(source,target,rows,outputs,{'input_kind':'image','frames_processed':1},summary)
+        details=result.details if result else None
+        return self._finish(source,target,rows,outputs,{'input_kind':'image','frames_processed':1},summary,details)
 
     def process_video(self,source:str|Path,output_dir:str|Path) -> dict:
         source=Path(source);target=Path(output_dir);target.mkdir(parents=True,exist_ok=True)
@@ -90,7 +93,9 @@ class MeasurementEngine:
         fourcc=cv2.VideoWriter_fourcc(*('mp4v' if self.options.video_format=='mp4' else 'MJPG'))
         extension='.mp4' if self.options.video_format=='mp4' else '.avi'
         corrected_writer=overlay_writer=None
-        rows=[];summary=[];outputs=[];original_index=0;processed=0
+        rows=[];summary=[];details=[];outputs=[];original_index=0;processed=0
+        if self.analyzer is not None and hasattr(self.analyzer, "reset"):
+            self.analyzer.reset()
         try:
             while True:
                 ok,frame=cap.read()
@@ -118,6 +123,8 @@ class MeasurementEngine:
                 if result:
                     summary.append(result.values)
                     rows.extend(result.rows if result.rows is not None else [result.values])
+                    if result.details:
+                        details.extend(result.details)
                 processed+=1;original_index+=1
         finally:
             cap.release()
@@ -127,9 +134,9 @@ class MeasurementEngine:
         return self._finish(source,target,rows,outputs,{'input_kind':'video','input_fps':fps,
                              'output_fps':fps/step,'frames_read':original_index,
                              'frames_processed':processed,'output_size_px':list(wh),
-                             'frame_step':step,'audio_preserved':False},summary)
+                             'frame_step':step,'audio_preserved':False},summary,details)
 
-    def _finish(self,source:Path,target:Path,rows:list,outputs:list,metadata:dict,summary:list|None=None):
+    def _finish(self,source:Path,target:Path,rows:list,outputs:list,metadata:dict,summary:list|None=None,details:list|None=None):
         if rows:
             with (target/'measurements.csv').open('w',encoding='utf-8-sig',newline='') as f:
                 writer=csv.DictWriter(f,fieldnames=list(rows[0].keys()),extrasaction='ignore')
@@ -140,13 +147,19 @@ class MeasurementEngine:
                 writer=csv.DictWriter(f,fieldnames=list(summary[0].keys()),extrasaction='ignore')
                 writer.writeheader();writer.writerows(summary)
             outputs.append('summary.csv')
+        if details:
+            with (target/'contour_points.csv').open('w',encoding='utf-8-sig',newline='') as f:
+                writer=csv.DictWriter(f,fieldnames=list(details[0].keys()),extrasaction='ignore')
+                writer.writeheader();writer.writerows(details)
+            outputs.append('contour_points.csv')
         manifest={'schema_version':1,'program_version':__version__,
                   'created_utc':datetime.now(timezone.utc).isoformat(),
                   'input':str(source.resolve()),'input_sha256':sha256(source),
                   'lens':self.lens,'plane':self.plane,
                   'scale_mm_per_pixel':self.options.scale_mm_per_pixel,
                   'analyzer':self.analyzer.name if self.analyzer else 'none',
-                  'analyzer_parameters':dict(vars(self.analyzer)) if self.analyzer else None,
+                  'analyzer_parameters':(self.analyzer.parameters() if hasattr(self.analyzer,'parameters')
+                                         else dict(vars(self.analyzer))) if self.analyzer else None,
                   'processing_options':dict(vars(self.options)),
                   'outputs':outputs,'metadata':metadata}
         dump_json(target/'manifest.json',manifest)

@@ -70,15 +70,33 @@ def process(input:Path,output_dir:Path=Path('results/latest'),lens:Path|None=Non
             scale_mm_per_pixel:float|None=None,video_format:str='mp4',
             frame_step:int=1, save_video:bool=True, save_overlay:bool=True,
             baseline_x:float|None=None, roi:str|None=None,
-            polarity:str='both',threshold:str='otsu',min_area:int=120):
+            polarity:str='both',threshold:str='otsu',min_area:int=120,
+            foil_min_separation:int=15, foil_blur:int=5, foil_sobel:int=3,
+            foil_min_gradient:float=4., bottom_polarity:str='bright',
+            bottom_blur:int=5, bottom_sobel:int=3, bottom_min_gradient:float=40.,
+            bottom_column_step:int=4, bottom_tracking_window:float=40.,
+            bottom_min_coverage:float=.60, bottom_fit_tolerance:float=6.,
+            bottom_reference_x:float|None=None, bottom_baseline_mode:str='first_valid',
+            bottom_baseline_y:float|None=None, bottom_baseline_frames:int=10,
+            bottom_save_points:bool=False):
     """任意の画像・動画を補正し、計測CSVと確認動画を保存する。"""
     if video_format not in ('mp4','avi'):raise typer.BadParameter('video-formatはmp4またはavi')
     options={}
     if analysis=='foil_shift':
-        options['baseline_x']=baseline_x
+        options.update(baseline_x=baseline_x,min_separation_px=foil_min_separation,
+                       gaussian_kernel=foil_blur,sobel_kernel=foil_sobel,
+                       min_gradient=foil_min_gradient)
+    if analysis=='foil_bottom':
+        options.update(polarity=bottom_polarity,gaussian_kernel=bottom_blur,
+                       sobel_kernel=bottom_sobel,min_gradient=bottom_min_gradient,
+                       column_step=bottom_column_step,tracking_window_px=bottom_tracking_window,
+                       min_coverage=bottom_min_coverage,fit_tolerance_px=bottom_fit_tolerance,
+                       reference_x_px=bottom_reference_x,baseline_mode=bottom_baseline_mode,
+                       baseline_y_px=bottom_baseline_y,baseline_frames=bottom_baseline_frames,
+                       save_contour_points=bottom_save_points)
     if analysis=='checkerboard':
         options.update(polarity=polarity,threshold=threshold,min_area=min_area)
-    if roi and analysis in ('foil_shift','checkerboard','edge'):
+    if roi and analysis in ('foil_shift','foil_bottom','checkerboard','edge'):
         try:options['roi']=tuple(map(int,roi.split(',')))
         except ValueError as exc:raise typer.BadParameter('roiは x0,y0,x1,y1') from exc
         if len(options['roi'])!=4:raise typer.BadParameter('roiは4値')
