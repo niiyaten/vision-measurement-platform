@@ -2,7 +2,7 @@
 from pathlib import Path
 import json
 import typer
-from .calibration import calibrate_lens, calibrate_plane_grid, calibrate_plane_points
+from .calibration import calibrate_lens, calibrate_plane_grid, calibrate_plane_points, calibrate_plane_rectangle
 from .io import dump_json, load_profile, load_image
 from .processing import MeasurementEngine, ProcessOptions
 from .analysis import create_analyzer
@@ -48,21 +48,40 @@ def plane_points(image:Path,correspondences:Path,output:Path=Path('profiles/plan
                                    load_profile(lens,'lens') if lens else None,pixels_per_mm)
     dump_json(output,result);typer.echo(f'保存: {output}')
 
+@app.command('plane-rectangle')
+def plane_rectangle(image:Path,points:Path,
+                    width_mm:float=typer.Option(...,help="長方形の実寸幅 mm"),
+                    height_mm:float=typer.Option(...,help="長方形の実寸高さ mm"),
+                    output:Path=Path('profiles/plane.json'),lens:Path|None=None):
+    """4点クリックで得た座標JSONと実寸から射影行列を求める。"""
+    frame=load_image(image)
+    data=json.loads(points.read_text(encoding='utf-8'))
+    import numpy as np
+    coords=data['image_points_px'] if isinstance(data,dict) else data
+    result=calibrate_plane_rectangle(np.asarray(coords),width_mm,height_mm,
+                                     (frame.shape[1],frame.shape[0]),
+                                     load_profile(lens,'lens') if lens else None)
+    dump_json(output,result)
+    typer.echo(f'保存: {output} / {1/result["pixels_per_mm"]:.5f} mm/px')
+
 @app.command('process')
 def process(input:Path,output_dir:Path=Path('results/latest'),lens:Path|None=None,
             plane:Path|None=None,analysis:str='foil_shift',
             scale_mm_per_pixel:float|None=None,video_format:str='mp4',
             frame_step:int=1, save_video:bool=True, save_overlay:bool=True,
-            baseline_x:float|None=None, roi:str|None=None):
+            baseline_x:float|None=None, roi:str|None=None,
+            polarity:str='both',threshold:str='otsu',min_area:int=120):
     """任意の画像・動画を補正し、計測CSVと確認動画を保存する。"""
     if video_format not in ('mp4','avi'):raise typer.BadParameter('video-formatはmp4またはavi')
     options={}
     if analysis=='foil_shift':
         options['baseline_x']=baseline_x
-        if roi:
-            try:options['roi']=tuple(map(int,roi.split(',')))
-            except ValueError as exc:raise typer.BadParameter('roiは x0,y0,x1,y1') from exc
-            if len(options['roi'])!=4:raise typer.BadParameter('roiは4値')
+    if analysis=='checkerboard':
+        options.update(polarity=polarity,threshold=threshold,min_area=min_area)
+    if roi and analysis in ('foil_shift','checkerboard','edge'):
+        try:options['roi']=tuple(map(int,roi.split(',')))
+        except ValueError as exc:raise typer.BadParameter('roiは x0,y0,x1,y1') from exc
+        if len(options['roi'])!=4:raise typer.BadParameter('roiは4値')
     engine=MeasurementEngine(load_profile(lens,'lens') if lens else None,
           load_profile(plane,'plane') if plane else None,
           create_analyzer(analysis,**options),

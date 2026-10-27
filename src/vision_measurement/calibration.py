@@ -192,3 +192,45 @@ def calibrate_plane_grid(path: str | Path, pattern=(14, 10), pitch_mm=14.,
         result['holdout_rms_px'] = None
         result['holdout_rms_mm'] = None
     return result
+
+
+def calibrate_plane_rectangle(image_points: np.ndarray, width_mm: float, height_mm: float,
+                              image_size: tuple[int, int], lens: dict | None = None,
+                              pixels_per_mm: float | None = None) -> dict:
+    """Four clicked corners (TL, TR, BR, BL) and measured dimensions -> plane H.
+
+    Pixel scale is estimated from the clicked side lengths if not supplied.
+    This makes a rectified *image*, not an independent accuracy guarantee.
+    """
+    corners = np.asarray(image_points, dtype=np.float64)
+    if corners.shape != (4, 2) or not np.isfinite(corners).all():
+        raise ValueError('4隅の画像座標を左上→右上→右下→左下の順で指定してください')
+    if not (np.isfinite(width_mm) and np.isfinite(height_mm) and width_mm > 0 and height_mm > 0):
+        raise ValueError('実寸幅・高さは正の値を指定してください')
+    # For a convex quadrilateral, all signed turns must have the same sign.
+    segments = np.roll(corners, -1, axis=0) - corners
+    turns = np.cross(segments, np.roll(segments, -1, axis=0))
+    if not (np.all(turns > 1e-5) or np.all(turns < -1e-5)):
+        raise ValueError('クリックした4点が凸四角形になっていません。順序を確認してください')
+    src = _undistort_points(corners, lens)
+    automatic_scale = pixels_per_mm is None
+    if automatic_scale:
+        edges = np.linalg.norm(src - np.roll(src, -1, axis=0), axis=1)
+        pixels_per_mm = float(np.median(edges / [width_mm, height_mm, width_mm, height_mm]))
+    if not np.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
+        raise ValueError('出力の画素密度を求められません')
+    world = np.asarray([(0, 0), (width_mm, 0), (width_mm, height_mm), (0, height_mm)],
+                       dtype=np.float64)
+    result = calibrate_plane_points(corners, world, image_size, lens, pixels_per_mm,
+                                    margin_mm=0, mode='clicked_rectangle')
+    result['rectangle_size_mm'] = [float(width_mm), float(height_mm)]
+    result['clicked_points_px'] = corners.tolist()
+    result['pixels_per_mm_source'] = ('automatically_estimated' if automatic_scale else 'manual')
+    # Keep the last transformed corner and ensure video-safe even dimensions.
+    def even_ceil(value: float) -> int:
+        import math
+        last_pixel=int(math.ceil(value))+1
+        return max(2,last_pixel+(last_pixel%2))
+    result['output_size_px'] = [even_ceil(width_mm*pixels_per_mm),
+                                even_ceil(height_mm*pixels_per_mm)]
+    return result

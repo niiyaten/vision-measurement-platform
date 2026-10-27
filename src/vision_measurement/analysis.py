@@ -1,6 +1,6 @@
 """追加可能な計測モジュール。各フレームをBGRで受け取る。"""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
@@ -8,6 +8,7 @@ import numpy as np
 class FrameResult:
     values: dict
     overlay: np.ndarray
+    rows: list[dict] | None = None
 
 class Analyzer:
     name = 'base'
@@ -63,31 +64,50 @@ class FoilShiftAnalyzer(Analyzer):
         return FrameResult(data, overlay)
 
 class CheckerboardAnalyzer(Analyzer):
-    """チェッカーボード交点間の水平・垂直距離（角点数を指定）。"""
+    """Detect both black and white squares; export each ID's four sides."""
     name='checkerboard'
-    def __init__(self, inner_corners: tuple[int,int] = (7,7)):
-        self.inner_corners=inner_corners
+    def __init__(self, roi=None, polarity='both', threshold='otsu',
+                 min_area=120, full_cells_only=True):
+        self.roi=roi
+        self.polarity=polarity
+        self.threshold=threshold
+        self.min_area=int(min_area)
+        self.full_cells_only=full_cells_only
 
-    def analyze(self, frame, mm_per_pixel, frame_index):
-        gray=cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        ok, corners = cv2.findChessboardCornersSB(gray,self.inner_corners)
+    def analyze(self,frame,mm_per_pixel,frame_index):
+        from .checkerboard import detect_cells, measure_cell
+        cells=detect_cells(frame,roi=self.roi,polarity=self.polarity,threshold=self.threshold,
+                           min_area=self.min_area,full_cells_only=self.full_cells_only)
         overlay=frame.copy()
-        if not ok:
-            return FrameResult({'frame':frame_index,'valid':False,'mean_edge_mm':None,'std_edge_mm':None},overlay)
-        cv2.drawChessboardCorners(overlay,self.inner_corners,corners,ok)
-        p=corners.reshape(self.inner_corners[1],self.inner_corners[0],2)
-        distances=np.r_[np.linalg.norm(np.diff(p,axis=0),axis=2).ravel(),
-                        np.linalg.norm(np.diff(p,axis=1),axis=2).ravel()]
-        factor=mm_per_pixel if mm_per_pixel is not None else 1.
-        return FrameResult({'frame':frame_index,'valid':True,'mean_edge_mm':float(np.mean(distances)*factor) if mm_per_pixel else None,
-                            'std_edge_mm':float(np.std(distances)*factor) if mm_per_pixel else None,
-                            'mean_edge_px':float(np.mean(distances))}, overlay)
+        rows=[measure_cell(cell,mm_per_pixel,frame_index) for cell in cells]
+        for cell in cells:
+            pts=np.round(cell.corners).astype(np.int32)
+            cv2.polylines(overlay,[pts],True,(40,210,50) if cell.color=='dark' else (255,80,50),2)
+            pos=(int(cell.center[0]-8),int(cell.center[1]+5))
+            cv2.putText(overlay,str(cell.id),pos,cv2.FONT_HERSHEY_SIMPLEX,.48,(0,0,255),2)
+        if self.roi is not None:
+            x0,y0,x1,y1=self.roi
+            cv2.rectangle(overlay,(x0,y0),(x1-1,y1-1),(0,170,240),1)
+        summary={'frame':frame_index,'valid':bool(cells),'cell_count':len(cells),
+                 'edge_count':len(cells)*4,
+                 'mean_edge_mm':float(np.mean([r['mean_mm'] for r in rows])) if rows and mm_per_pixel is not None else None,
+                 'std_edge_mm':float(np.std([r[f'{side}_mm'] for r in rows
+                                          for side in ('top','right','bottom','left')]))
+                               if rows and mm_per_pixel is not None else None}
+        return FrameResult(summary,overlay,rows)
 
 class EdgeAnalyzer(Analyzer):
     name='edge'
-    def __init__(self, low=50, high=150): self.low=low;self.high=high
+    def __init__(self, low=50, high=150, roi=None): self.low=low;self.high=high;self.roi=roi
     def analyze(self,frame,mm_per_pixel,frame_index):
-        edges=cv2.Canny(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),self.low,self.high)
+        gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        edges=np.zeros_like(gray)
+        if self.roi is None:
+            edges=cv2.Canny(gray,self.low,self.high)
+        else:
+            x0,y0,x1,y1=self.roi
+            if not (0<=x0<x1<=frame.shape[1] and 0<=y0<y1<=frame.shape[0]):raise ValueError('ROIが画像外です')
+            edges[y0:y1,x0:x1]=cv2.Canny(gray[y0:y1,x0:x1],self.low,self.high)
         overlay=frame.copy();overlay[edges>0]=(0,0,255)
         return FrameResult({'frame':frame_index,'edge_pixels':int(np.count_nonzero(edges))},overlay)
 

@@ -75,8 +75,9 @@ class MeasurementEngine:
             save_image(target/'corrected.png',corrected);outputs.append('corrected.png')
         if result and self.options.save_overlay:
             save_image(target/'overlay.png',result.overlay);outputs.append('overlay.png')
-        rows=[result.values] if result else []
-        return self._finish(source,target,rows,outputs,{'input_kind':'image','frames_processed':1})
+        rows=(result.rows if result.rows is not None else [result.values]) if result else []
+        summary=[result.values] if result else []
+        return self._finish(source,target,rows,outputs,{'input_kind':'image','frames_processed':1},summary)
 
     def process_video(self,source:str|Path,output_dir:str|Path) -> dict:
         source=Path(source);target=Path(output_dir);target.mkdir(parents=True,exist_ok=True)
@@ -89,7 +90,7 @@ class MeasurementEngine:
         fourcc=cv2.VideoWriter_fourcc(*('mp4v' if self.options.video_format=='mp4' else 'MJPG'))
         extension='.mp4' if self.options.video_format=='mp4' else '.avi'
         corrected_writer=overlay_writer=None
-        rows=[];outputs=[];original_index=0;processed=0
+        rows=[];summary=[];outputs=[];original_index=0;processed=0
         try:
             while True:
                 ok,frame=cap.read()
@@ -114,7 +115,9 @@ class MeasurementEngine:
                         outputs.append(fn)
                 if corrected_writer is not None:corrected_writer.write(corrected[:wh[1],:wh[0]])
                 if overlay_writer is not None:overlay_writer.write((result.overlay if result else corrected)[:wh[1],:wh[0]])
-                if result:rows.append(result.values)
+                if result:
+                    summary.append(result.values)
+                    rows.extend(result.rows if result.rows is not None else [result.values])
                 processed+=1;original_index+=1
         finally:
             cap.release()
@@ -124,20 +127,27 @@ class MeasurementEngine:
         return self._finish(source,target,rows,outputs,{'input_kind':'video','input_fps':fps,
                              'output_fps':fps/step,'frames_read':original_index,
                              'frames_processed':processed,'output_size_px':list(wh),
-                             'frame_step':step,'audio_preserved':False})
+                             'frame_step':step,'audio_preserved':False},summary)
 
-    def _finish(self,source:Path,target:Path,rows:list,outputs:list,metadata:dict):
+    def _finish(self,source:Path,target:Path,rows:list,outputs:list,metadata:dict,summary:list|None=None):
         if rows:
             with (target/'measurements.csv').open('w',encoding='utf-8-sig',newline='') as f:
                 writer=csv.DictWriter(f,fieldnames=list(rows[0].keys()),extrasaction='ignore')
                 writer.writeheader();writer.writerows(rows)
             outputs.append('measurements.csv')
+        if summary and (not rows or summary!=rows):
+            with (target/'summary.csv').open('w',encoding='utf-8-sig',newline='') as f:
+                writer=csv.DictWriter(f,fieldnames=list(summary[0].keys()),extrasaction='ignore')
+                writer.writeheader();writer.writerows(summary)
+            outputs.append('summary.csv')
         manifest={'schema_version':1,'program_version':__version__,
                   'created_utc':datetime.now(timezone.utc).isoformat(),
                   'input':str(source.resolve()),'input_sha256':sha256(source),
                   'lens':self.lens,'plane':self.plane,
                   'scale_mm_per_pixel':self.options.scale_mm_per_pixel,
                   'analyzer':self.analyzer.name if self.analyzer else 'none',
+                  'analyzer_parameters':dict(vars(self.analyzer)) if self.analyzer else None,
+                  'processing_options':dict(vars(self.options)),
                   'outputs':outputs,'metadata':metadata}
         dump_json(target/'manifest.json',manifest)
         return manifest
