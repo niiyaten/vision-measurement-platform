@@ -74,3 +74,26 @@ def test_checkerboard_pixel_only_without_scale():
     assert out.values['cell_count']==35
     assert out.rows[0]['top_mm'] is None
     assert out.rows[0]['top_px']>0
+
+
+def test_rectangle_does_not_call_removed_numpy_2d_cross(monkeypatch):
+    """NumPy 2.5+ rejects np.cross with 2D vectors; rectangle must not use it."""
+    def unsupported_2d_cross(*args, **kwargs):
+        raise AssertionError("np.cross must not be used for four 2D corners")
+
+    monkeypatch.setattr(np, 'cross', unsupported_2d_cross)
+    points = np.array([[110., 75.], [425., 102.], [398., 335.], [86., 320.]])
+    profile = calibrate_plane_rectangle(points, width_mm=100.0, height_mm=60.0,
+                                        image_size=(640, 480))
+    assert profile['mode'] == 'clicked_rectangle'
+    assert profile['fit_rms_px'] < 1e-3
+    H = np.asarray(profile['homography_undistorted_to_plane'])
+    transformed = cv2.perspectiveTransform(points.reshape(-1, 1, 2), H).reshape(-1, 2)
+    expected = np.asarray([[0, 0], [100, 0], [100, 60], [0, 60]]) * profile['pixels_per_mm']
+    np.testing.assert_allclose(transformed, expected, atol=1e-4)
+
+
+def test_rectangle_rejects_collinear_points_without_numpy_cross():
+    pts = np.asarray([[10., 10.], [20., 20.], [30., 30.], [40., 40.]])
+    with pytest.raises(ValueError, match='凸四角形'):
+        calibrate_plane_rectangle(pts, 100., 60., (640, 480))
