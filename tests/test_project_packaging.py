@@ -15,5 +15,5 @@ def test_wheel_source_package_is_explicit():
 
 def test_default_python_version():
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert (ROOT / ".python-version").read_text().strip() == "3.15.2"
+    assert (ROOT / ".python-version").read_text().strip() == "3.15"
     assert data["project"]["requires-python"] == ">=3.15,<3.16"
