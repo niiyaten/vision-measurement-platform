@@ -2,6 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from collections.abc import Callable
+from time import perf_counter
 import cv2
 import numpy as np
 from .io import load_image, read_frames
@@ -31,17 +32,30 @@ def _detector(min_area: float = 15., max_area: float = 80000.) -> cv2.SimpleBlob
 
 def detect_grid(frame: np.ndarray, pattern: tuple[int, int] = (14, 10),
                 fill_holes: bool = True, fill_kernel: int = 9,
-                blob_min_area: float = 15., blob_max_area: float = 80000.) -> np.ndarray | None:
-    """対称円グリッド検出。白抜きドットはClosingで補正して再試行。"""
+                blob_min_area: float = 15., blob_max_area: float = 80000.,
+                skip_busy_trials: bool = True) -> np.ndarray | None:
+    """Detect symmetric circles; skip images with excessive blob candidates.
+
+    On cluttered CLAHE frames, OpenCV's grid search may take many seconds.
+    Count blobs before grid matching to avoid expensive impossible trials.
+    Disable this heuristic only for unusually cluttered calibration boards.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8)).apply(gray)
-    trials = [gray, clahe]
+    trials = [gray]
     if fill_holes:
         k = max(3, int(fill_kernel) | 1)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        trials += [cv2.morphologyEx(clahe, cv2.MORPH_CLOSE, kernel)]
+        trials.append(cv2.morphologyEx(clahe, cv2.MORPH_CLOSE, kernel))
+    trials.append(clahe)
     detector = _detector(blob_min_area, blob_max_area)
+    expected = int(pattern[0] * pattern[1])
+    max_candidates = max(500, expected * 4)
     for image in trials:
+        if skip_busy_trials:
+            n = len(detector.detect(image))
+            if n < expected or n > max_candidates:
+                continue
         for flags in (cv2.CALIB_CB_SYMMETRIC_GRID,
                       cv2.CALIB_CB_SYMMETRIC_GRID | cv2.CALIB_CB_CLUSTERING):
             ok, points = cv2.findCirclesGrid(image, pattern, flags=flags, blobDetector=detector)
@@ -74,7 +88,7 @@ def calibrate_lens(video: str | Path, pattern=(14, 10), pitch_mm=14., step=10,
                    max_checked=300, max_used=35, min_change=0.025,
                    fill_holes=True, fill_kernel=9,
                    blob_min_area=15., blob_max_area=80000.,
-                   progress: Callable[[dict], None] | None = None) -> dict:
+                   skip_busy_trials=True, progress: Callable[[dict], None] | None = None) -> dict:
     """Calibrate intrinsic parameters, emitting per-inspected-frame progress events.
 
     Progress event: stage (inspection/fitting/done), inspected, detected, used,
@@ -86,18 +100,24 @@ def calibrate_lens(video: str | Path, pattern=(14, 10), pitch_mm=14., step=10,
     obj3d = np.column_stack([obj2d, np.zeros(len(obj2d))]).astype(np.float32)
     objects, images, frames, size, last = [], [], [], None, None
     inspected = detected = 0
+    duration = None
     total = _estimated_video_samples(video, step, max_checked) if progress else None
 
     def notify(stage: str, frame: int | None = None):
         if progress is not None:
             progress({'stage': stage, 'inspected': inspected, 'detected': detected,
-                      'used': len(images), 'total': total, 'frame': frame})
+                      'used': len(images), 'total': total, 'frame': frame,
+                      'last_detection_s': duration})
 
     notify('inspection')
     for idx, frame in read_frames(video, step, max_checked):
         inspected += 1
         size = (frame.shape[1], frame.shape[0])
-        pts = detect_grid(frame, pattern, fill_holes, fill_kernel, blob_min_area, blob_max_area)
+        notify('scanning', idx)
+        detection_start = perf_counter()
+        pts = detect_grid(frame, pattern, fill_holes, fill_kernel, blob_min_area, blob_max_area,
+                          skip_busy_trials=skip_busy_trials)
+        duration = perf_counter() - detection_start
         if pts is not None:
             detected += 1
             desc = _diversity(pts, size)
