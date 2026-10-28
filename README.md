@@ -6,12 +6,38 @@
 
 このリポジトリは初期検証版です。現場設備での測定精度はまだ確認していません。
 
-## 最初に試す
+## Pythonのバージョンとインストール
 
-Python 3.11と[uv](https://docs.astral.sh/uv/)を使用します。WindowsのPowerShellで次を実行してください。
+標準環境はPython **3.15.2**（64-bit）です。プロジェクト直下の `.python-version` に指定しています。
+
+指定された3.14.16は2026年10月現在まだ未公開です。3.14系列の最新版は3.14.10です。今回の標準環境には、公開済みでより新しい3.15.2を選びました。
+
+`uv sync` に失敗していた原因は、リポジトリ名とPythonパッケージ名が異なり、Hatchlingがソースの場所を特定できなかったことです。`pyproject.toml` に `packages = ["src/vision_measurement"]` を追加しています。
+
+PowerShellでリポジトリ直下に移動し、次を実行してください。
 
 ```powershell
-uv sync --group dev
+uv self update
+uv python install 3.15.2
+uv sync --python 3.15.2 --group dev
+uv run python --version
+uv run python -c "import vision_measurement; print('import OK')"
+uv run streamlit run src/vision_measurement/gui.py
+```
+
+`uv sync --python` はプロジェクト内の仮想環境を更新します。システム全体のPythonを上書きしません。旧バージョンの `.venv` が残っていても、指定したPythonで作り直します。
+
+依存関係はPython 3.15向けWindows配布があるNumPy・OpenCV・pandas・Pillow・Streamlitを中心に更新しました。OpenCVは `opencv-python-headless` のみを使用します。手動で別のOpenCVパッケージを重複インストールしないでください。
+
+WindowsとPython 3.15.2の組み合わせはGitHub Actionsで自動テストします。**この結果を確認するまでは、Windows実機での動作保証はできません。** Python 3.13での既存計測テスト17件は成功しています。初回 `uv sync` で生成される `uv.lock` は、検証後にリポジトリへ追加する予定です。
+
+## 最初に試す
+
+Python 3.15.2と[uv](https://docs.astral.sh/uv/)を使用します。WindowsのPowerShellで次を実行してください。
+
+```powershell
+uv python install 3.15.2
+uv sync --python 3.15.2 --group dev
 uv run streamlit run src/vision_measurement/gui.py
 ```
 
@@ -200,7 +226,7 @@ READMEは読み手が必要な手順を探せるよう、使用方法・仕様�
 
 ## 補足：uv.lockについて
 
-この初期版には `uv.lock` を同梱していません。依存関係は `pyproject.toml` に記載してあります。初回の `uv sync` 時にロックファイルを生成します。生成後は必要に応じてGitで管理してください。
+現在は `uv.lock` を同梱していません。初回の `uv sync` で生成されます。Windows上での依存関係を確認した後にGit管理する予定です。
 
 ## 動作確認動画
 
