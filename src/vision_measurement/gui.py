@@ -79,7 +79,7 @@ if screen=='校正管理':
             pitch=st.number_input('円中心間隔 (mm)',value=14.,min_value=0.001)
             fill=st.checkbox('白抜きドットを黒塗り補正して検出',value=True)
         with st.expander('詳細設定（通常は変更不要）', expanded=False):
-            step=st.number_input('検査するフレーム間隔（1＝毎フレーム）',min_value=1,value=10 if is_lens else 15)
+            step=st.number_input('検査するフレーム間隔（1＝毎フレーム）',min_value=1,value=5 if is_lens else 15)
             if is_lens:
                 max_checked=st.number_input('最大検査フレーム数',min_value=5,value=300)
                 max_used=st.number_input('校正に採用する最大枚数',min_value=5,value=35)
