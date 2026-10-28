@@ -47,3 +47,26 @@ def test_progress_works_when_insufficient_frames():
         calibrate_lens(video, max_checked=3, progress=events.append)
     assert events[-1]['stage'] == 'inspection'
     assert events[-1]['inspected'] == 3
+
+
+def test_busy_blob_scene_skips_expensive_search(monkeypatch):
+    """High-candidate scenes should not call costly grid clustering."""
+    from unittest.mock import Mock
+    import numpy as np
+    import vision_measurement.calibration as calibration
+    monkeypatch.setattr(calibration, '_detector', lambda *args: Mock(detect=lambda image: [None] * 999))
+    called = Mock(side_effect=AssertionError('Expensive grid matching should be skipped'))
+    monkeypatch.setattr(calibration.cv2, 'findCirclesGrid', called)
+    image = np.zeros((320, 420, 3), dtype=np.uint8)
+    assert calibration.detect_grid(image, (14, 10), skip_busy_trials=True) is None
+    called.assert_not_called()
+
+
+def test_calibration_progress_has_before_and_after_notifications():
+    video = Path(__file__).parent / 'fixtures' / 'lens_grid.mp4'
+    events = []
+    calibrate_lens(video, step=1, max_checked=30, min_change=.001, progress=events.append)
+    scanned = [event for event in events if event['stage'] == 'scanning']
+    inspected = [event for event in events if event['stage'] == 'inspection' and event['inspected'] > 0]
+    assert len(scanned) == len(inspected) == 30
+    assert all(event['last_detection_s'] is not None and event['last_detection_s'] >= 0 for event in inspected)
