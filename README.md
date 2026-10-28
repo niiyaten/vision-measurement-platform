@@ -29,7 +29,7 @@ uv run streamlit run src/vision_measurement/gui.py
 
 依存関係はPython 3.15向けWindows配布があるNumPy・OpenCV・pandas・Pillow・Streamlitを中心に更新しました。OpenCVは `opencv-python-headless` のみを使用します。手動で別のOpenCVパッケージを重複インストールしないでください。
 
-WindowsとPython 3.15.2の組み合わせはGitHub Actionsで自動テストします。**この結果を確認するまでは、Windows実機での動作保証はできません。** Python 3.13での自動テスト19件は成功しています（Python 3.15.2の実機検証とは別です）。初回 `uv sync` で生成される `uv.lock` は、検証後にリポジトリへ追加する予定です。
+WindowsとPython 3.15.2の組み合わせはGitHub Actionsで自動テストします。**この結果を確認するまでは、Windows実機での動作保証はできません。** 既存環境での自動テスト19件は成功していますが、Python 3.15.2・Windows環境での動作は別途確認が必要です。初回 `uv sync` で生成される `uv.lock` は、検証後にリポジトリへ追加する予定です。
 
 ## 最初に試す
 
