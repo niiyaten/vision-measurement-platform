@@ -265,7 +265,10 @@ def calibrate_plane_rectangle(image_points: np.ndarray, width_mm: float, height_
         raise ValueError('実寸幅・高さは正の値を指定してください')
     # For a convex quadrilateral, all signed turns must have the same sign.
     segments = np.roll(corners, -1, axis=0) - corners
-    turns = np.cross(segments, np.roll(segments, -1, axis=0))
+    # NumPy 2.5 removed support for 2-D vectors in np.cross().
+    # The scalar 2-D determinant gives the signed turn at each corner.
+    next_segments = np.roll(segments, -1, axis=0)
+    turns = segments[:, 0] * next_segments[:, 1] - segments[:, 1] * next_segments[:, 0]
     if not (np.all(turns > 1e-5) or np.all(turns < -1e-5)):
         raise ValueError('クリックした4点が凸四角形になっていません。順序を確認してください')
     src = _undistort_points(corners, lens)
