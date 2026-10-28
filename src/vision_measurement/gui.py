@@ -1,5 +1,6 @@
 """Streamlit GUI。処理はAPI層へ委譲。"""
 from pathlib import Path
+from time import perf_counter
 import json
 import tempfile
 import cv2
@@ -64,12 +65,14 @@ if screen=='校正管理':
         lens=choose_profile('平面校正に使用するレンズ校正','lens','plane_lens')
     x=y=pitch=fill=None
     step=10
-    max_checked=300
+    max_checked=120
     max_used=35
     min_change=.025
     fill_kernel=9
     blob_min_area=15.
     blob_max_area=80000.
+    skip_busy_trials=True
+    check_frame=0
     if is_lens or '円グリッド' in mode:
         cols=st.columns(2)
         with cols[0]:
@@ -81,13 +84,15 @@ if screen=='校正管理':
         with st.expander('詳細設定（通常は変更不要）', expanded=False):
             step=st.number_input('検査するフレーム間隔（1＝毎フレーム）',min_value=1,value=5 if is_lens else 15)
             if is_lens:
-                max_checked=st.number_input('最大検査フレーム数',min_value=5,value=300)
+                max_checked=st.number_input('最大検査フレーム数',min_value=5,value=120)
                 max_used=st.number_input('校正に採用する最大枚数',min_value=5,value=35)
                 min_change=st.number_input('採用フレームの姿勢差しきい値（0で重複を許可）',
                                             min_value=0.,value=.025,format='%.4f')
                 st.caption('採用枚数が少ない場合は姿勢差しきい値を下げるか、撮影角度を増やしてください。')
                 blob_min_area=st.number_input('ドット検出の最小面積（px²）',min_value=1.,value=15.)
                 blob_max_area=st.number_input('ドット検出の最大面積（px²）',min_value=2.,value=80000.)
+                skip_busy_trials=st.checkbox('円候補が多すぎるフレームは高速スキップ（推奨）',value=True)
+                check_frame=st.number_input('検出テストに使うフレーム番号',min_value=0,value=0,step=1)
             if fill:
                 fill_kernel=st.slider('白抜きドット補正のカーネル（奇数px）',3,31,9,2)
     rectangle_points=None
@@ -118,6 +123,29 @@ if screen=='校正管理':
         st.code('{"image_points_px": [[100,100],[400,100],[400,300],[100,300]],\n "world_points_mm": [[0,0],[100,0],[100,60],[0,60]]}',language='json')
         points=st.text_area('対応点JSON',height=150)
         ppm=st.number_input('出力画素密度 (px/mm)',value=2.,min_value=0.01)
+    if is_lens and st.button('1フレームだけ円グリッド検出テスト'):
+        try:
+            if not source or not Path(source).is_file():
+                raise ValueError('校正動画のパスを指定してください')
+            from vision_measurement.calibration import detect_grid
+            with st.spinner('指定フレームの円グリッドを検出しています…'):
+                frame=preview_frame(source,int(check_frame))
+                start=perf_counter()
+                pts=detect_grid(frame,(int(x),int(y)),fill_holes=fill,
+                                fill_kernel=int(fill_kernel),
+                                blob_min_area=float(blob_min_area),blob_max_area=float(blob_max_area),
+                                skip_busy_trials=skip_busy_trials)
+                elapsed=perf_counter()-start
+            if pts is None:
+                st.warning(f'検出できませんでした（{elapsed:.2f}秒）。点数・ドットの見え方・撮影範囲・検出条件を確認してください。')
+                st.image(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB),caption='検出テストに使用したフレーム')
+            else:
+                show=frame.copy()
+                cv2.drawChessboardCorners(show,(int(x),int(y)),pts.reshape(-1,1,2),True)
+                st.success(f'{int(x)*int(y)}点を検出しました（{elapsed:.2f}秒）')
+                st.image(cv2.cvtColor(show,cv2.COLOR_BGR2RGB),caption='検出した円中心（検出テスト）')
+        except Exception as exc:
+            st.error(f'検出テストに失敗しました：{exc}')
     if st.button('校正を実行',type='primary'):
         try:
             if not source or not Path(source).is_file():
@@ -131,10 +159,13 @@ if screen=='校正管理':
                         total=info['total']
                         detected=info['detected']
                         used=info['used']
-                        if stage=='inspection':
-                            pct=min(95,int(95*inspected/total)) if total else min(90,int(90*inspected/max_checked))
+                        if stage in ('inspection','scanning'):
+                            pct=min(95,int(95*(inspected if stage=='inspection' else inspected-1)/total)) if total else min(90,int(90*inspected/max_checked))
                             count=f'{inspected}/{total}' if total else f'{inspected}（上限{max_checked}）'
-                            bar.progress(pct,text=f'円グリッドを検査中：{count}枚｜検出{detected}枚｜採用{used}枚')
+                            timing=(f'｜直近{info["last_detection_s"]:.2f}秒/枚'
+                                    if info.get('last_detection_s') is not None else '')
+                            prefix=f'フレーム{info["frame"]}を検出中…' if stage=='scanning' else '検査済み'
+                            bar.progress(max(0,pct),text=f'{prefix}：{count}枚｜検出{detected}枚｜採用{used}枚{timing}')
                         elif stage=='fitting':
                             bar.progress(97,text=f'カメラパラメータを計算中：採用{used}枚')
                         else:
@@ -143,7 +174,7 @@ if screen=='校正管理':
                         max_checked=int(max_checked),max_used=int(max_used),min_change=float(min_change),
                         fill_holes=fill,fill_kernel=int(fill_kernel),
                         blob_min_area=float(blob_min_area),blob_max_area=float(blob_max_area),
-                        progress=on_progress)
+                        skip_busy_trials=skip_busy_trials,progress=on_progress)
                     status.update(label='レンズ校正が完了しました',state='complete',expanded=False)
                 st.metric('再投影RMS（px）',f'{result["rms_reprojection_px"]:.4f}')
                 st.caption(f'検査：{result["frames_checked"]}枚 / 検出：{result["frames_detected"]}枚 / '
