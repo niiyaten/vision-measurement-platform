@@ -8,36 +8,33 @@
 
 ## Pythonのバージョンとインストール
 
-標準環境はPython **3.15.2**（64-bit）です。プロジェクト直下の `.python-version` に指定しています。
+このプロジェクトはPython **3.15系**を使用します。`.python-version` は `3.15`（パッチバージョンは固定しない）で、`pyproject.toml` の `requires-python` は `>=3.15,<3.16` です。
 
-指定された3.14.16は2026年10月現在まだ未公開です。3.14系列の最新版は3.14.10です。今回の標準環境には、公開済みでより新しい3.15.2を選びました。
+2026年10月28日時点でPython公式の3.15.2は公開されていますが、uv 0.13.5の管理対象は3.15.1までです。従来の `3.15.2` 固定では `No interpreter found` になり得るため、3.15系の最新利用可能版をuvが選択できるようにしました。後日uvが3.15.2に対応すれば、その版も選択対象になります。
 
-`uv sync` に失敗していた原因は、リポジトリ名とPythonパッケージ名が異なり、Hatchlingがソースの場所を特定できなかったことです。`pyproject.toml` に `packages = ["src/vision_measurement"]` を追加しています。
-
-PowerShellでリポジトリ直下に移動し、次を実行してください。
+WindowsのPowerShellでリポジトリ直下に移動し、次を実行してください。
 
 ```powershell
 uv self update
-uv python install 3.15.2
-uv sync --python 3.15.2 --group dev
+uv --version
+uv python install 3.15
+uv sync --group dev
 uv run python --version
 uv run python -c "import vision_measurement; print('import OK')"
 uv run streamlit run src/vision_measurement/gui.py
 ```
 
-`uv sync --python` はプロジェクト内の仮想環境を更新します。システム全体のPythonを上書きしません。旧バージョンの `.venv` が残っていても、指定したPythonで作り直します。
+`uv self update` はuvの公式スタンドアロン版で使用できます。pip・pipx・wingetなどで導入した場合は、インストール元に応じてuvを更新してください。Python 3.13など、他のプロジェクトで使っているPythonを削除する必要はありません。
 
-依存関係はPython 3.15向けWindows配布があるNumPy・OpenCV・pandas・Pillow・Streamlitを中心に更新しました。OpenCVは `opencv-python-headless` のみを使用します。手動で別のOpenCVパッケージを重複インストールしないでください。
-
-WindowsとPython 3.15.2の組み合わせはGitHub Actionsで自動テストします。**この結果を確認するまでは、Windows実機での動作保証はできません。** 既存環境での自動テスト19件は成功していますが、Python 3.15.2・Windows環境での動作は別途確認が必要です。初回 `uv sync` で生成される `uv.lock` は、検証後にリポジトリへ追加する予定です。
+パッケージのビルドには `[tool.hatch.build.targets.wheel]` の `packages = ["src/vision_measurement"]` を指定しています。依存関係はNumPy、OpenCV（headless版）、Typer、Streamlit、pandas、Pillow、およびクリック・ROI用のStreamlit拡張です。Windowsでの環境構築とテスト用にGitHub Actionsを設定していますが、実機での動作確認は別途必要です。
 
 ## 最初に試す
 
-Python 3.15.2と[uv](https://docs.astral.sh/uv/)を使用します。WindowsのPowerShellで次を実行してください。
+Python 3.15系と[uv](https://docs.astral.sh/uv/)を使用します。WindowsのPowerShellで次を実行してください。
 
 ```powershell
-uv python install 3.15.2
-uv sync --python 3.15.2 --group dev
+uv python install 3.15
+uv sync --python 3.15 --group dev
 uv run streamlit run src/vision_measurement/gui.py
 ```
 
