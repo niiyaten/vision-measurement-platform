@@ -9,6 +9,7 @@ from vision_measurement.io import dump_json,load_profile,load_image
 from vision_measurement.processing import MeasurementEngine,ProcessOptions
 from vision_measurement.analysis import create_analyzer
 from vision_measurement.gui_interaction import preview_frame,frame_picker,four_clicks,drag_roi
+from vision_measurement.gui_utils import normalize_user_path, default_calibration_name
 
 st.set_page_config(page_title='画像・動画計測',layout='wide')
 st.title('画像・動画計測プラットフォーム')
@@ -38,8 +39,9 @@ def choose_profile(label,kind,key):
     except Exception as exc:st.error(str(exc));return None
 
 def save_profile(result,name):
-    if not name or any(x in name for x in '/\\..'):
-        st.error('保存名は英数字・日本語・ハイフン・アンダースコアを使用してください')
+    if (not name or name in ('.', '..') or name.startswith('.') or name.endswith('.')
+            or any(x in name for x in '/\\:*?"<>|')):
+        st.error('保存名に使えない文字が含まれています')
         return
     path=PROFILES/(name+'.json');dump_json(path,result)
     st.success(f'校正結果を登録しました: {path}')
@@ -47,17 +49,47 @@ def save_profile(result,name):
 screen=st.sidebar.radio('画面',['計測','校正管理','結果の確認'])
 if screen=='校正管理':
     mode=st.radio('校正の種類',['レンズ校正（円グリッド動画）','平面校正（円グリッド画像・動画）','平面校正（長方形の四隅をクリック）','平面校正（対応点JSON・上級者向け）'])
-    source=st.text_input('校正入力のファイルパス（ローカルPC）')
-    name=st.text_input('保存する校正名','calibration_A')
+    source_raw=st.text_input('校正入力のファイルパス（ローカルPC）',
+                             placeholder=r'"D:\撮影\校正動画.avi" も使用できます')
+    source=normalize_user_path(source_raw)
+    is_lens=mode.startswith('レンズ')
+    suggested_name=default_calibration_name(source,is_lens)
+    name=st.text_input('保存する校正名（拡張子.jsonは自動付加）',
+                       value=suggested_name,key=f'profile_name::{mode}::{source}')
+    if source_raw and source_raw!=source:
+        st.caption(f'パスの外側の引用符を除去して読み込みます：{source}')
+    if source:
+        st.caption(f'保存先：profiles/{name}.json')
     if mode.startswith('平面'):
         lens=choose_profile('平面校正に使用するレンズ校正','lens','plane_lens')
-    cols=st.columns(2)
-    with cols[0]:
-        x=st.number_input('グリッド列数',value=14,min_value=3)
-        y=st.number_input('グリッド行数',value=10,min_value=3)
-    with cols[1]:
-        pitch=st.number_input('円中心間隔 (mm)',value=14.,min_value=0.001)
-        fill=st.checkbox('白抜きドットを黒塗り補正して検出',value=True)
+    x=y=pitch=fill=None
+    step=10
+    max_checked=300
+    max_used=35
+    min_change=.025
+    fill_kernel=9
+    blob_min_area=15.
+    blob_max_area=80000.
+    if is_lens or '円グリッド' in mode:
+        cols=st.columns(2)
+        with cols[0]:
+            x=st.number_input('グリッド列数',value=14,min_value=3)
+            y=st.number_input('グリッド行数',value=10,min_value=3)
+        with cols[1]:
+            pitch=st.number_input('円中心間隔 (mm)',value=14.,min_value=0.001)
+            fill=st.checkbox('白抜きドットを黒塗り補正して検出',value=True)
+        with st.expander('詳細設定（通常は変更不要）', expanded=False):
+            step=st.number_input('検査するフレーム間隔（1＝毎フレーム）',min_value=1,value=10 if is_lens else 15)
+            if is_lens:
+                max_checked=st.number_input('最大検査フレーム数',min_value=5,value=300)
+                max_used=st.number_input('校正に採用する最大枚数',min_value=5,value=35)
+                min_change=st.number_input('採用フレームの姿勢差しきい値（0で重複を許可）',
+                                            min_value=0.,value=.025,format='%.4f')
+                st.caption('採用枚数が少ない場合は姿勢差しきい値を下げるか、撮影角度を増やしてください。')
+                blob_min_area=st.number_input('ドット検出の最小面積（px²）',min_value=1.,value=15.)
+                blob_max_area=st.number_input('ドット検出の最大面積（px²）',min_value=2.,value=80000.)
+            if fill:
+                fill_kernel=st.slider('白抜きドット補正のカーネル（奇数px）',3,31,9,2)
     rectangle_points=None
     if '四隅をクリック' in mode:
         st.subheader('既知寸法の長方形を4点クリック')
@@ -86,15 +118,40 @@ if screen=='校正管理':
         st.code('{"image_points_px": [[100,100],[400,100],[400,300],[100,300]],\n "world_points_mm": [[0,0],[100,0],[100,60],[0,60]]}',language='json')
         points=st.text_area('対応点JSON',height=150)
         ppm=st.number_input('出力画素密度 (px/mm)',value=2.,min_value=0.01)
-    else:
-        step=st.number_input('動画フレーム間隔',value=10,min_value=1)
     if st.button('校正を実行',type='primary'):
         try:
-            if not Path(source).is_file():raise ValueError('校正入力ファイルを指定してください')
-            if mode.startswith('レンズ'):
-                result=calibrate_lens(source,(int(x),int(y)),pitch,int(step),fill_holes=fill)
+            if not source or not Path(source).is_file():
+                raise ValueError(f'ファイルが見つかりません：{source or "未指定"}。コピーしたパスと存在場所を確認してください')
+            if is_lens:
+                with st.status('レンズ校正を実行中',expanded=True) as status:
+                    bar=st.progress(0,text='動画を開いて検査を開始します…')
+                    def on_progress(info):
+                        stage=info['stage']
+                        inspected=info['inspected']
+                        total=info['total']
+                        detected=info['detected']
+                        used=info['used']
+                        if stage=='inspection':
+                            pct=min(95,int(95*inspected/total)) if total else min(90,int(90*inspected/max_checked))
+                            count=f'{inspected}/{total}' if total else f'{inspected}（上限{max_checked}）'
+                            bar.progress(pct,text=f'円グリッドを検査中：{count}枚｜検出{detected}枚｜採用{used}枚')
+                        elif stage=='fitting':
+                            bar.progress(97,text=f'カメラパラメータを計算中：採用{used}枚')
+                        else:
+                            bar.progress(100,text=f'校正完了：検査{inspected}枚、検出{detected}枚、採用{used}枚')
+                    result=calibrate_lens(source,(int(x),int(y)),pitch,int(step),
+                        max_checked=int(max_checked),max_used=int(max_used),min_change=float(min_change),
+                        fill_holes=fill,fill_kernel=int(fill_kernel),
+                        blob_min_area=float(blob_min_area),blob_max_area=float(blob_max_area),
+                        progress=on_progress)
+                    status.update(label='レンズ校正が完了しました',state='complete',expanded=False)
+                st.metric('再投影RMS（px）',f'{result["rms_reprojection_px"]:.4f}')
+                st.caption(f'検査：{result["frames_checked"]}枚 / 検出：{result["frames_detected"]}枚 / '
+                           f'採用：{len(result["frames_used"])}枚')
             elif '円グリッド' in mode:
-                result=calibrate_plane_grid(source,(int(x),int(y)),pitch,lens,step=int(step),fill_holes=fill)
+                with st.spinner('円グリッドを検出し、射影変換を計算しています…'):
+                    result=calibrate_plane_grid(source,(int(x),int(y)),pitch,lens,
+                        step=int(step),fill_holes=fill,fill_kernel=int(fill_kernel))
             elif '四隅をクリック' in mode:
                 if not rectangle_points or len(rectangle_points)!=4:raise ValueError('4隅を順にクリックしてください')
                 import numpy as np
@@ -118,7 +175,7 @@ elif screen=='計測':
         mm=st.number_input('射影変換なしのときの分解能 (mm/px)。0ならpxのみ',value=0.,min_value=0.,format='%.6f')
     else:mm=0.
     st.subheader('2. 計測入力')
-    source=st.text_input('計測対象の画像・動画パス')
+    source=normalize_user_path(st.text_input('計測対象の画像・動画パス'))
     analysis=st.selectbox('計測方法',['foil_shift','foil_bottom','checkerboard','edge','none'],format_func=lambda x:
         {'foil_shift':'電極箔・左右端と中心の変位','foil_bottom':'電極箔・下端輪郭の追跡','checkerboard':'市松模様（各マスの4辺）','edge':'汎用エッジ','none':'補正のみ'}[x])
     baseline=st.number_input('箔中心の基準X座標(px)。0は初回検出を基準',value=0.) if analysis=='foil_shift' else 0.
@@ -195,7 +252,7 @@ elif screen=='計測':
         thresh=st.selectbox('二値化方式',['otsu','adaptive'])
     
     st.subheader('3. 保存設定')
-    out=st.text_input('結果保存先','results/current')
+    out=normalize_user_path(st.text_input('結果保存先','results/current'))
     c1,c2,c3=st.columns(3)
     with c1:save_corr=st.checkbox('補正動画・画像を保存',True)
     with c2:save_ov=st.checkbox('確認動画・画像を保存',True)
