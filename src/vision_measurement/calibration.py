@@ -1,6 +1,7 @@
 """共通の円グリッド検出、レンズと平面の校正。"""
 from __future__ import annotations
 from pathlib import Path
+from collections.abc import Callable
 import cv2
 import numpy as np
 from .io import load_image, read_frames
@@ -13,11 +14,13 @@ def grid_object_points(pattern: tuple[int, int], pitch_mm: float) -> np.ndarray:
     return (np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * pitch_mm).astype(np.float32)
 
 
-def _detector() -> cv2.SimpleBlobDetector:
+def _detector(min_area: float = 15., max_area: float = 80000.) -> cv2.SimpleBlobDetector:
     p = cv2.SimpleBlobDetector_Params()
     p.filterByArea = True
-    p.minArea = 15
-    p.maxArea = 80000
+    if not (0 < min_area < max_area):
+        raise ValueError("ブロブ面積の最小値・最大値を確認してください")
+    p.minArea = float(min_area)
+    p.maxArea = float(max_area)
     p.filterByCircularity = False
     p.filterByConvexity = False
     p.filterByInertia = False
@@ -27,7 +30,8 @@ def _detector() -> cv2.SimpleBlobDetector:
 
 
 def detect_grid(frame: np.ndarray, pattern: tuple[int, int] = (14, 10),
-                fill_holes: bool = True, fill_kernel: int = 9) -> np.ndarray | None:
+                fill_holes: bool = True, fill_kernel: int = 9,
+                blob_min_area: float = 15., blob_max_area: float = 80000.) -> np.ndarray | None:
     """対称円グリッド検出。白抜きドットはClosingで補正して再試行。"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8)).apply(gray)
@@ -36,7 +40,7 @@ def detect_grid(frame: np.ndarray, pattern: tuple[int, int] = (14, 10),
         k = max(3, int(fill_kernel) | 1)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         trials += [cv2.morphologyEx(clahe, cv2.MORPH_CLOSE, kernel)]
-    detector = _detector()
+    detector = _detector(blob_min_area, blob_max_area)
     for image in trials:
         for flags in (cv2.CALIB_CB_SYMMETRIC_GRID,
                       cv2.CALIB_CB_SYMMETRIC_GRID | cv2.CALIB_CB_CLUSTERING):
@@ -54,35 +58,67 @@ def _diversity(points: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return np.r_[center, extent, np.arctan2(horizontal[1], horizontal[0]) / np.pi]
 
 
+def _estimated_video_samples(video: str | Path, step: int, limit: int) -> int | None:
+    """Estimate selected frames for an honest progress percentage (None if unknown)."""
+    cap = cv2.VideoCapture(str(video))
+    try:
+        if not cap.isOpened():
+            return None
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        return min(limit, (n + step - 1) // step) if n > 0 else None
+    finally:
+        cap.release()
+
+
 def calibrate_lens(video: str | Path, pattern=(14, 10), pitch_mm=14., step=10,
                    max_checked=300, max_used=35, min_change=0.025,
-                   fill_holes=True, fill_kernel=9) -> dict:
+                   fill_holes=True, fill_kernel=9,
+                   blob_min_area=15., blob_max_area=80000.,
+                   progress: Callable[[dict], None] | None = None) -> dict:
+    """Calibrate intrinsic parameters, emitting per-inspected-frame progress events.
+
+    Progress event: stage (inspection/fitting/done), inspected, detected, used,
+    total (None if unavailable). Callback never mutates processing decisions.
+    """
+    if step < 1 or max_checked < 1 or max_used < 5 or min_change < 0:
+        raise ValueError('検査間隔・枚数・姿勢差を確認してください（採用上限は5枚以上）')
     obj2d = grid_object_points(pattern, pitch_mm)
     obj3d = np.column_stack([obj2d, np.zeros(len(obj2d))]).astype(np.float32)
     objects, images, frames, size, last = [], [], [], None, None
     inspected = detected = 0
+    total = _estimated_video_samples(video, step, max_checked) if progress else None
+
+    def notify(stage: str, frame: int | None = None):
+        if progress is not None:
+            progress({'stage': stage, 'inspected': inspected, 'detected': detected,
+                      'used': len(images), 'total': total, 'frame': frame})
+
+    notify('inspection')
     for idx, frame in read_frames(video, step, max_checked):
         inspected += 1
         size = (frame.shape[1], frame.shape[0])
-        pts = detect_grid(frame, pattern, fill_holes, fill_kernel)
-        if pts is None:
-            continue
-        detected += 1
-        desc = _diversity(pts, size)
-        if last is not None and np.linalg.norm(desc - last) < min_change:
-            continue
-        objects.append(obj3d.copy()); images.append(pts.reshape(-1, 1, 2)); frames.append(idx)
-        last = desc
+        pts = detect_grid(frame, pattern, fill_holes, fill_kernel, blob_min_area, blob_max_area)
+        if pts is not None:
+            detected += 1
+            desc = _diversity(pts, size)
+            if last is None or np.linalg.norm(desc - last) >= min_change:
+                objects.append(obj3d.copy())
+                images.append(pts.reshape(-1, 1, 2))
+                frames.append(idx)
+                last = desc
+        notify('inspection', idx)
         if len(images) >= max_used:
             break
     if len(images) < 5:
         raise ValueError(f'校正に必要な画像が不足（検査{inspected}、検出{detected}、採用{len(images)}）。')
+    notify('fitting')
     rms, k, d, rvecs, tvecs = cv2.calibrateCamera(objects, images, size, None, None)
     per_frame = []
     for idx, obj, img, r, t in zip(frames, objects, images, rvecs, tvecs):
         pred, _ = cv2.projectPoints(obj, r, t, k, d)
         err = float(np.sqrt(np.mean(np.sum((pred - img).reshape(-1, 2)**2, axis=1))))
         per_frame.append({'frame': idx, 'rms_px': err})
+    notify('done')
     return {'schema_version': 3, 'type': 'lens', 'source_size_px': list(size),
             'camera_matrix': k.tolist(), 'distortion_coefficients': d.ravel().tolist(),
             'rms_reprojection_px': float(rms), 'frames_checked': inspected,
