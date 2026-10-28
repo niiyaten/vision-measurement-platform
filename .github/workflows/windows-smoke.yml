@@ -1,0 +1,29 @@
+name: Windows packaging and measurement tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+      - name: Install Python 3.15.2
+        run: uv python install 3.15.2
+      - name: Build and install dependencies
+        run: uv sync --python 3.15.2 --group dev
+      - name: Check imports and CLI
+        run: |
+          uv run --no-sync python -c "import sys, numpy, cv2, pandas, streamlit, PIL, vision_measurement; print(sys.version); print('opencv', cv2.__version__)"
+          uv run --no-sync vmeasure --help
+      - name: Run regression tests
+        run: uv run --no-sync pytest -q
